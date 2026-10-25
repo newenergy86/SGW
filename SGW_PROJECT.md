@@ -1,502 +1,314 @@
 # SGW — Satellite Modbus Gateway
 
-**Project status:** Development / laboratory prototype
-**Last updated:** 2026-10-25
+**Project status:** Development / laboratory prototype  
+**Last updated:** 2026-10-25  
 **Primary source of truth:** this file
 
 ---
 
 ## 1. Project purpose
 
-SGW (Satellite Modbus Gateway) is a custom gateway intended to replace Moxa NPort serial device servers in a system where Modbus RTU devices communicate over a high-latency satellite IP channel.
+SGW is a protocol-agnostic serial device-server prototype intended eventually to replace Moxa NPort devices in a system communicating over a high-latency satellite IP channel.
 
-The key problem is the satellite link latency. The current estimated round-trip time (RTT) is approximately **2200 ms**. With approximately **80 polled devices**, a conventional request/response exchange can become extremely slow.
+The current estimated satellite round-trip time is approximately **2200 ms**. The broader system has approximately **80 polled devices**, but those higher-level Modbus concerns are explicitly outside the first prototype.
 
-The project goal is therefore two-stage:
+### First engineering objective
 
-1. reproduce the required serial/Ethernet gateway behaviour so SGW can replace an NPort without changing the Modbus RTU field devices;
-2. introduce an SGW-specific transport/gateway mechanism that reduces the effect of satellite latency while preserving correct and safe Modbus control semantics.
+> Demonstrate a reliable, bidirectional, protocol-independent serial-byte bridge over IP, using Moxa NPort as a behavioural reference.
 
-The system is used in a control/automation context, so command integrity and predictable failure behaviour have priority over maximum throughput.
+For SGW V0, every serial payload is opaque. The firmware must not parse Modbus, apply CRC rules to the payload, identify command meaning, or optimise transactions. Those are potential later milestones, after the transparent transport works.
 
 ---
 
-## 2. Existing system
+## 2. Existing system and reference equipment
 
-The known topology is approximately:
+The known system uses Moxa NPort serial device servers. The central side has been described as an eight-port NPort and the remote side typically as a one-port NPort. Model numbers mentioned in project history include NPort 5250A/5030 on the central side and 5010 on the remote side; **the exact installed model and configuration for the intended bench test must be verified**.
+
+Expected compatibility boundary:
+
+- serial byte stream remains unchanged;
+- serial parameters are configurable;
+- network connection and recovery behaviour are observable;
+- SGW does not need to know the payload protocol;
+- mixed NPort ↔ SGW testing is performed only using a compatible, explicitly configured NPort operating mode.
+
+NPort operating modes are configurable, not universal. Before a real interoperability test, record the exact model, port mode (e.g. TCP Client, TCP Server or Pair Connection), IP addresses/ports, and serial settings. Do not assume that any generic TCP socket automatically makes two devices interchangeable.
+
+---
+
+## 3. Target topology
+
+The final prototype target remains two identical two-port nodes:
 
 ```text
-                    Satellite / IP channel
-                           │
-             ┌─────────────┴─────────────┐
-             │                           │
-        Moxa NPort 5250A             Moxa NPort 5010
-        (central side)               (remote side)
-             │                           │
-           RS-232                    RS-232
-             │                           │
-          Modbus RTU                Modbus RTU
-             │                           │
-           SAU / master              remote device
+                  IP network / later satellite
+                    ┌───────────────┐
+                    │               │
+                  SGW-A  ◄──────►  SGW-B
+                    │               │
+                RS-232 ×2       RS-232 ×2
 ```
 
-The central NPort 5250A has eight serial ports. The current system uses one serial port per remote channel, with each channel communicating with its corresponding remote object. A single eight-port NPort is preferred over eight one-port units partly to avoid unnecessary multiplication of IP addresses.
-
-The exact current NPort operating parameters are not yet available and remain **TBD** until access to the operational equipment is available.
-
-Known/expected compatibility target:
-
-- RS-232;
-- Modbus RTU byte stream;
-- Ethernet/IP transport;
-- NPort-like serial-device-server interoperability sufficient for staged replacement.
+The nodes should use a common firmware base with roles and network parameters defined by configuration. A later revision may scale to eight serial ports on the central side.
 
 ---
 
-## 3. Target SGW topology
+## 4. Hardware state — distinguish available from ordered
 
-The first prototype consists of **two identical two-port SGW devices**.
+### Available now
 
-```text
-              Ethernet / IP
-                   │
-          ┌────────┴────────┐
-          │                 │
-        SGW-A             SGW-B
-          │                 │
-       RS-232 ×2         RS-232 ×2
-          │                 │
-      arbitrary         arbitrary
-      byte stream       byte stream
-```
+- **1 × ESP32-S3 development board** is available and may temporarily be borrowed from another project for SGW bench experiments.
+- The exact ESP32-S3 board SKU, flash size and PSRAM configuration have not yet been recorded.
 
-The prototype hardware is intentionally small. After the architecture and transport are proven, the design can be expanded to an eight-port implementation.
-
----
-
-## 4. Prototype hardware
-
-### Selected
-
-- **MCU:** ESP32-S3
-- **Ethernet controller:** W5500
-- **Prototype quantity:** 2 MCU boards + 2 W5500 modules
-- **Serial side:** RS-232 transceivers are required between ESP32-S3 UARTs and the physical RS-232 interface.
-
-The ESP32-S3 is a development/proof-of-concept choice. It is not yet the final industrial MCU decision.
-
-The W5500 is intended to provide a hardware Ethernet interface and reduce the amount of Ethernet/TCP/IP implementation that must be handled directly by the MCU application.
-
-### Hardware principle
-
-Keep the application/gateway architecture independent of the final PCB and MCU where practical. The laboratory firmware should therefore be structured so that a later industrial MCU/PCB can replace the ESP32-S3 prototype without redesigning the SGW protocol and gateway logic.
-
----
-
-## 5. Architecture
-
-The firmware should be separated into logical layers:
-
-```text
-+------------------------------------------------+
-| SGW Application / Gateway Core                 |
-| channel management / buffers / commands       |
-+------------------------------------------------+
-| SGW Transport                                  |
-| framing / transaction IDs / ACK / retry       |
-+------------------------------------------------+
-| Compatibility Layer                             |
-| serial parameters / byte-stream interface      |
-+------------------------------------------------+
-| Hardware Abstraction                            |
-| UART / RS-232 / W5500 / timers / GPIO          |
-+------------------------------------------------+
-| ESP32-S3 + W5500                                |
-+------------------------------------------------+
-```
-
-**Important development boundary:** Modbus interpretation is deliberately outside the first prototype. SGW V0 treats the serial side as an arbitrary byte stream. Modbus-specific parsing, polling and cache logic are introduced only after the transparent serial/Ethernet transport is proven.
-
----
-
-## 6. NPort interoperability strategy
-
-Moxa NPort remains the functional reference for the first stage. SGW does **not** need to reproduce every feature of the NPort product; it must first reproduce the subset required by this system.
-
-The migration must support mixed operation during development where practical:
-
-```text
-NPort ↔ SGW
-```
-
-as well as the final configuration:
-
-```text
-SGW ↔ SGW
-```
-
-The first objective is transparent operation. Only after transparent operation is demonstrated should the SGW-specific optimization be enabled.
-
-The first compatibility target is therefore **serial-device-server behaviour**, not Modbus semantics: bytes entering an SGW serial port must be transported to the corresponding remote serial port without the gateway needing to understand their meaning.
-
----
-
-## 7. Development sequence
-
-### M0 — Project baseline
-
-Status: **COMPLETED / BASELINE CREATED**
-
-- Define the problem and existing topology.
-- Establish the repository as the persistent project source.
-- Record the selected prototype hardware.
-- Define the staged development strategy.
-- Establish the AI-assisted development workflow defined in Section 12.
-
-### M1 — Hardware bring-up
-
-Status: **WAITING FOR HARDWARE**
-
-- ESP32-S3 development environment.
-- Basic firmware boot and diagnostics.
-- UART operation.
-- W5500 SPI interface.
-- Ethernet link.
-- TCP connectivity.
-- RS-232 electrical interface.
-
-Acceptance: each hardware subsystem operates independently and diagnostics are available.
-
-### M2 — SGW V0: transparent Serial ↔ Ethernet bridge
-
-Status: **NEXT DEVELOPMENT TARGET**
-
-Build a minimal SGW-A ↔ SGW-B connection over ordinary LAN Ethernet. At this stage SGW treats the serial interface as an opaque byte stream. No Modbus parsing or protocol-specific optimisation is required.
-
-Initial transport may be ordinary TCP. The transport choice for the optimized satellite mode remains open until experiments establish the requirements.
-
-Acceptance:
-
-- arbitrary bytes can be transmitted in both directions;
-- byte ordering and content are preserved;
-- two serial ports are logically independent;
-- continuous traffic does not lose or reorder bytes under normal LAN conditions;
-- connection loss and recovery are observable and deterministic;
-- diagnostics expose RX/TX byte counts and connection state.
-
-### M3 — NPort interoperability
-
-Status: **PLANNED**
-
-Test SGW against an existing NPort in the laboratory.
-
-Test both directions where applicable:
-
-```text
-NPort ↔ SGW
-SGW ↔ NPort
-```
-
-The exact NPort mode and parameters will be determined from the operational configuration when access becomes available.
-
-Acceptance: SGW can replace an NPort for the selected test channel without modification of the attached serial device.
-
-### M4 — Transparent Modbus RTU bridge
-
-Status: **PLANNED**
-
-Only after M2/M3 are stable, verify the transparent bridge using actual Modbus RTU traffic.
-
-Implement/test:
-
-```text
-RS-232 → SGW-A → Ethernet → SGW-B → RS-232
-```
-
-and reverse direction.
-
-At this stage SGW should behave as a transparent serial gateway from the Modbus device's perspective.
-
-Acceptance:
-
-- Modbus request arrives unchanged;
-- response returns correctly;
-- serial timing/parameters are preserved;
-- independent ports do not interfere;
-- RX/TX/error counters are available.
-
-### M5 — SGW-to-SGW transport
-
-Status: **PLANNED**
-
-Introduce the first version of the SGW transport protocol.
-
-Required concepts include:
-
-- packet framing;
-- protocol version;
-- channel/port identification;
-- transaction ID;
-- payload length;
-- integrity/error detection;
-- transport acknowledgement;
-- duplicate detection;
-- retransmission/recovery;
-- connection/session state.
-
-The exact wire format is **not frozen yet**.
-
-### M6 — Satellite simulation
-
-Status: **PLANNED**
-
-Test the system with artificial latency approximately matching the real link:
-
-**RTT ≈ 2200 ms**.
-
-Also test:
-
-- packet loss;
-- delayed packets;
-- Ethernet/TCP disconnect;
-- reconnection;
-- duplicate delivery;
-- restart of one gateway.
-
-Acceptance: deterministic recovery and clearly defined channel state after failures.
-
-### M7 — Latency optimization
-
-Status: **PLANNED**
-
-Compare conventional Modbus request/response transport with SGW optimized transport.
-
-Potential mechanisms to evaluate:
-
-- aggregation of transactions;
-- pipelining;
-- local polling on the remote side;
-- telemetry cache;
-- block transfer of results;
-- priority queues;
-- independent control-command path.
-
-The project must measure actual improvement rather than assume that simply placing several Modbus frames into one TCP packet solves the RTT problem.
-
-### M8 — Control-command safety
-
-Status: **PLANNED**
-
-Control commands such as changing a valve position require stronger semantics than ordinary telemetry.
-
-The protocol must distinguish at least:
-
-```text
-RECEIVED / transport ACK
-EXECUTED / execution confirmed
-FAILED / device reported failure
-UNKNOWN / execution state cannot be established
-```
-
-A transport acknowledgement must never be treated as proof that a control action was executed.
-
-After reconnection, an old control command must not be silently replayed merely because it was not acknowledged.
-
-### M9 — First field channel
-
-Status: **PLANNED**
-
-Replace one existing NPort channel under controlled conditions.
-
-Recommended sequence:
-
-1. establish known-good NPort baseline;
-2. install SGW in compatibility mode;
-3. observe/log operation;
-4. validate failure recovery;
-5. enable optimized transport only after compatibility is proven;
-6. compare performance with baseline.
-
-The migration must remain reversible.
-
-### M10 — Multi-channel / final hardware
-
-Status: **PLANNED**
-
-After successful two-port laboratory and field validation:
-
-- scale the design toward eight serial ports;
-- select final MCU;
-- design custom PCB;
-- define enclosure/power requirements;
-- perform long-duration testing;
-- progressively replace remaining NPort channels.
-
----
-
-## 8. Critical design requirements
-
-### 8.1 Channel isolation
-
-Each logical channel must remain independent. Traffic or failure on one channel must not corrupt another channel's state.
-
-### 8.2 Control priority
-
-Control commands have higher priority than ordinary telemetry where simultaneous traffic competes for the satellite link.
-
-### 8.3 Duplicate protection
-
-The protocol must make it possible to identify and suppress duplicate execution of a control transaction.
-
-### 8.4 Failure semantics
-
-The gateway must distinguish transport state from remote-device execution state.
-
-### 8.5 Freshness
-
-Cached telemetry must carry freshness/age information so stale values cannot be mistaken for current measurements.
-
-### 8.6 Recovery
-
-A link interruption must result in a deterministic state machine for reconnect, resynchronization and outstanding transactions.
-
----
-
-## 9. What is intentionally NOT decided yet
-
-The following must remain open until laboratory tests and requirements justify a decision:
-
-- TCP vs UDP vs hybrid SGW transport;
-- exact SGW packet format;
-- exact aggregation/pipelining algorithm;
-- local remote-side polling strategy;
-- final MCU;
-- final number of serial ports;
-- final PCB;
-- final power supply;
-- exact NPort compatibility feature subset.
-
-We should not prematurely freeze these items.
-
----
-
-## 10. Development principle: reuse before invention
-
-For each significant subsystem, first search for an existing proven implementation, library, protocol or hardware design that can reduce development time and risk.
-
-This applies especially to:
-
-- serial/Ethernet gateway logic;
-- W5500 drivers;
-- TCP/IP handling;
-- packet framing and CRC;
-- retransmission/session logic;
-- embedded diagnostics;
-- configuration mechanisms;
-- later, Modbus RTU framing and gateway logic.
-
-Custom code should be introduced where existing solutions cannot satisfy the satellite-latency/control requirements.
-
----
-
-## 11. Current project state
-
-**Hardware ordered:**
+### Previously ordered for the intended prototype
 
 - 2 × ESP32-S3 development boards;
-- 2 × W5500 modules.
+- 2 × W5500 Ethernet modules.
 
-**Current laboratory target:**
+These are marked **ORDERED / NOT YET VERIFIED AS DELIVERED** until the user confirms arrival.
 
-Two identical two-port SGW prototypes.
+### Serial electrical interface
 
-**Current architectural decision:**
+ESP32-S3 UART signals are logic-level signals, not RS-232 line levels. A suitable RS-232 transceiver is required between the MCU UART and a physical NPort RS-232 connection. Do not connect UART GPIO directly to an RS-232 port.
 
-First implement a protocol-agnostic transparent Serial ↔ Ethernet bridge, verify NPort interoperability, then introduce optimized SGW transport. Modbus-specific optimisation is intentionally deferred.
+### Temporary network path
 
-**Known satellite condition:**
+For the first experiment, the available ESP32-S3 may use its built-in Wi-Fi instead of W5500. This is a temporary laboratory substitution, not a change to the target wired-Ethernet design.
 
-Estimated RTT ≈ 2200 ms.
-
-**Known scale:**
-
-Approximately 80 polled devices in the broader system; the first prototype is intentionally limited to two ports.
-
-**Immediate next task:**
-
-Prepare the ESP32-S3/W5500 laboratory firmware and test plan so that hardware can be tested immediately when the ordered components arrive.
+The ESP32-S3 Wi-Fi path can validate IP/TCP application logic and basic interoperability. It does **not** validate W5500 hardware, wired Ethernet performance, nor the eventual satellite-link behaviour.
 
 ---
 
-## 12. AI-assisted development protocol
+## 5. Architecture principle
 
-This project is developed jointly through the ChatGPT conversation and the GitHub repository. The repository is the persistent source of truth; the conversation is the interactive engineering workspace.
+Develop the smallest working layer first:
 
-### 12.1 No manual documentation maintenance
+```text
+RS-232 device
+     │
+RS-232 transceiver
+     │
+ESP32-S3 UART
+     │
+opaque byte buffers
+     │
+TCP socket over Wi-Fi (temporary)
+     │
+Moxa NPort / test endpoint
 
-The user should not be required to manually copy decisions, test results, code or project state from the conversation into repository files. When a significant project-state change is established, the assistant should update the appropriate repository file as part of the development workflow.
+Later: replace the temporary Wi-Fi link with the intended Ethernet path.
+```
 
-### 12.2 Inspect before changing
+For the actual two-node byte bridge, the target flow is:
 
-Before modifying project files, the assistant should inspect the current repository state and the relevant file version. Changes must preserve valid existing information and avoid overwriting unrelated work.
+```text
+Serial A → SGW-A → IP transport → SGW-B → Serial B
+Serial B → SGW-B → IP transport → SGW-A → Serial A
+```
 
-### 12.3 Record state, not conversation noise
+The transport must preserve the stream's byte order and content. TCP does not preserve application write boundaries as message boundaries; the bridge must forward the stream as bytes and must not rely on one socket read corresponding to one serial frame or one socket send.
 
-The repository should contain durable engineering information rather than a transcript of the chat. Record decisions, requirements, verified test results, assumptions, rejected alternatives, implementation status and next actions.
+### Logical software layers
 
-### 12.4 Explicit status labels
+- **Hardware interface:** UART, Wi-Fi initially, W5500 later, GPIO and timers.
+- **Byte-stream bridge:** bounded buffers, forward progress, backpressure/overflow accounting.
+- **Connection manager:** socket state, reconnect handling, diagnostics.
+- **Configuration/diagnostics:** network settings, serial parameters, counters and reset reason.
 
-Where useful, distinguish:
-
-- **FACT** — verified by documentation, measurement or experiment;
-- **DECISION** — explicitly accepted as the current project choice;
-- **ASSUMPTION** — working hypothesis not yet verified;
-- **TBD** — information required but currently unavailable;
-- **REJECTED** — considered and intentionally not selected.
-
-The assistant must not silently convert an assumption into a fact.
-
-### 12.5 One next step
-
-At the end of a meaningful development stage, identify one concrete next action with an objective acceptance criterion. Avoid presenting a large unsorted list of simultaneous tasks when one dependency must be completed first.
-
-### 12.6 Evidence before architecture
-
-When an important behaviour is unknown, prefer a small experiment, measurement or inspection of an existing implementation before freezing an architecture around an assumption.
-
-### 12.7 Reuse before invention
-
-Before implementing a substantial subsystem from scratch, search for existing compatible hardware, firmware, libraries, protocols, reference implementations and proven engineering approaches. Reuse is preferred when it reduces risk without compromising the project requirements.
-
-### 12.8 Milestone discipline
-
-Development proceeds through explicit milestones. Do not move a milestone to complete until its acceptance criteria are demonstrated. If an experiment contradicts an earlier assumption, update the project state and revise the next milestone rather than hiding the discrepancy.
-
-### 12.9 Keep early prototypes simple
-
-The first implementation should prove the smallest useful technical claim. For SGW V0 that claim is: **two nodes can reliably transport an arbitrary serial byte stream over Ethernet in both directions**. Modbus semantics, satellite optimisation and advanced gateway functions must not be introduced before the lower layer is demonstrated.
-
-### 12.10 Session recovery
-
-When a new SGW work session starts, the assistant should inspect the repository and determine:
-
-1. current project state;
-2. latest completed milestone;
-3. unresolved blockers;
-4. latest verified test results;
-5. current decisions and open questions;
-6. the single most appropriate next action.
-
-The assistant should use the repository rather than relying on memory of an earlier conversation.
+Modbus parsing, local polling, cache, data concentration and command semantics are explicitly postponed.
 
 ---
 
-## 13. Development log
+## 6. Temporary ESP32-S3 + Wi-Fi + Moxa experiment
 
-### 2026-10-25
+The existing single ESP32-S3 can be used to start the network-side experiment before the remaining boards and W5500 arrive.
 
-- GitHub repository `newenergy86/SGW` established as the project repository.
-- `SGW_PROJECT.md` established as the primary persistent project-state document.
-- Prototype hardware selected: ESP32-S3 + W5500, two nodes, two serial ports per node.
-- Development strategy refined: first build a protocol-agnostic transparent Serial ↔ Ethernet bridge; Modbus and satellite-specific optimisation follow only after the basic transport is proven.
-- AI-assisted development protocol added to prevent loss of decisions and to minimise manual project-documentation work.
+### Possible test arrangement
+
+One possible first setup is:
+
+```text
+Moxa NPort (configured TCP Client or Server)
+              │
+          Wi-Fi/LAN
+              │
+      ESP32-S3 TCP endpoint
+```
+
+Which endpoint must act as TCP client/server depends on the actual NPort mode and test topology. Determine this from the NPort configuration; do not guess.
+
+This **first test only proves that the ESP32 can communicate with the configured NPort over IP**. It does not yet prove a serial bridge because the ESP32 needs a suitable RS-232 transceiver and application that couples UART bytes to the socket.
+
+### Test stages
+
+**W0 — Board identity and firmware toolchain**
+- Record exact board/module marking and available USB/serial interfaces.
+- Build and flash a minimal firmware.
+- Acceptance: stable boot log, known firmware/toolchain version, and repeatable flashing.
+
+**W1 — Wi-Fi network**
+- Connect ESP32-S3 to a controlled local Wi-Fi access point.
+- Log assigned IP, RSSI (as available), disconnect/reconnect events.
+- Acceptance: stable IP connectivity and recovery after AP disconnection.
+
+**W2 — TCP socket interoperability with NPort**
+- Record exact NPort model, operation mode, local port, destination IP/port and serial settings.
+- Implement the required TCP role on ESP32-S3.
+- Exchange a known test pattern with a TCP peer/NPort where the configured mode permits.
+- Acceptance: the test confirms bidirectional TCP payload delivery; save logs and configuration summary.
+
+**W3 — RS-232 electrical connection**
+- Identify the available RS-232 transceiver/interface module.
+- Confirm correct DB9 signals and whether the NPort/device expects DTE or DCE wiring, including any null-modem crossover requirement.
+- Acceptance: UART↔RS-232 loopback works without directly connecting MCU GPIO to RS-232 voltage levels.
+
+**W4 — Byte-stream bridge**
+- Couple UART RX/TX and the TCP socket in both directions.
+- Use a repeatable test pattern including all byte values where practical, long bursts and irregular pauses.
+- Acceptance: exact payload bytes and order are preserved; counters match; queue overflow and disconnect behaviour are visible.
+
+This sequence deliberately separates IP/TCP checks from serial electrical testing so failures can be located rather than debugged simultaneously.
+
+---
+
+## 7. Milestones
+
+### M0 — Project baseline
+**Status: COMPLETED**
+- Repository established as persistent project state.
+- Prototype strategy recorded.
+- AI-assisted workflow defined.
+
+### M1 — Single-board Wi-Fi/TCP proof
+**Status: NEXT / IN PROGRESS**
+- Use the available ESP32-S3 board temporarily.
+- Establish reliable Wi-Fi connectivity and TCP socket operation.
+- Identify the NPort model and exact configuration required for interoperability.
+- Do not require W5500 or a second ESP32-S3 for this preliminary network test.
+
+**Acceptance:** ESP32-S3 is reachable over the intended test LAN and can exchange test payloads with a TCP peer in the role required by the configured NPort mode. Save build details and logs.
+
+### M2 — RS-232 hardware bring-up
+**Status: BLOCKED BY INTERFACE DETAILS**
+- Identify or obtain a suitable RS-232 transceiver/module.
+- Confirm wiring and serial parameters.
+- Verify UART loopback and RS-232 loopback.
+
+**Acceptance:** error-free repeatable data exchange through the physical RS-232 interface.
+
+### M3 — SGW V0 byte-stream bridge
+**Status: PLANNED**
+- Connect UART and TCP path both ways.
+- Add bounded buffering and overflow counters.
+- Implement visible disconnect/reconnect state.
+- Keep the payload protocol-agnostic.
+
+**Acceptance:** exact byte and order preservation in both directions over sustained traffic; predictable behaviour after connection loss.
+
+### M4 — NPort interoperability
+**Status: PLANNED**
+- Run NPort ↔ SGW tests using the actual device configuration.
+- Test in whichever TCP Client/Server topology is supported and practical.
+- Record any serial data-packing, inactivity or framing settings that affect behaviour.
+
+**Acceptance:** successful repeatable byte transfer via NPort and SGW with no assumption of compatibility beyond what has been tested.
+
+### M5 — Two-node SGW over wired Ethernet
+**Status: PLANNED / WAITING FOR ORDERED HARDWARE**
+- Use the two ESP32-S3 boards and W5500 modules.
+- Replace temporary Wi-Fi network with W5500-based wired Ethernet where appropriate.
+- Preserve the byte-stream API and bridge logic where possible.
+
+**Acceptance:** two SGW nodes pass bidirectional byte-stream tests over wired Ethernet.
+
+### M6 — High-latency and recovery tests
+**Status: PLANNED**
+- Apply controlled latency, initially progressing toward RTT ≈ 2200 ms.
+- Test disconnects, reconnection and sustained transfer.
+- Measure throughput, latency and buffering limits.
+
+**Acceptance:** metrics and failure/recovery behaviour are documented. This stage tests the transparent baseline; it does not yet claim satellite optimisation.
+
+### M7 — SGW-specific transport optimisation
+**Status: FUTURE**
+Only after M3–M6 results, investigate improvements beyond a transparent bridge. Any optimisation must be justified by measurements. Modbus-specific features remain a later decision.
+
+---
+
+## 8. Requirements for the transparent byte bridge
+
+- Payload bytes must not be interpreted or modified.
+- Byte order must be preserved.
+- Both directions must work.
+- Each serial channel must be isolated from other channels.
+- Serial RX/TX buffers must be bounded and monitored.
+- Overflow must be counted and visible; silent data loss is unacceptable.
+- TCP state and disconnects must be observable.
+- Reconnection must not silently splice unrelated old-session bytes into a new session without a documented policy.
+- Diagnostics should include firmware version, reset reason, IP/link state, socket state, RX/TX byte counters, overflow counters and connection-loss count.
+- The bridge must not assume TCP packet boundaries correspond to serial messages.
+- Do not introduce payload-level CRC or Modbus-aware behaviour into V0.
+
+---
+
+## 9. Open questions
+
+- Exact ESP32-S3 board/module SKU and memory configuration.
+- Exact Moxa model used for the first bench experiment.
+- Current NPort operating mode and serial/network parameters.
+- Availability of an RS-232 transceiver/module and suitable cable.
+- Whether the NPort and ESP32 can be placed on the same local IP network for the first test.
+- Which firmware framework will be used. ESP-IDF is the current candidate; the choice should be made based on the user's installed environment and simplest repeatable workflow.
+- Exact W5500 model/module wiring, to be checked when delivered.
+- Final transport design for a satellite link remains open.
+
+---
+
+## 10. Development rule: reuse before invention
+
+Before implementing a substantial subsystem, check existing drivers, examples, protocol implementations and reference designs. Reuse is preferred when compatible with requirements and maintainability. Do not build an elaborate protocol before the basic bridge has been measured.
+
+---
+
+## 11. AI-assisted development protocol
+
+The GitHub repository is the persistent source of truth; the conversation is the engineering workspace.
+
+- Before a work session, inspect relevant repository state and identify the current milestone.
+- Update repository files after significant decisions, implementation changes and verified tests; do not copy the whole conversation into the repository.
+- Distinguish **FACT**, **DECISION**, **ASSUMPTION**, **TBD** and **REJECTED**.
+- Never silently turn an assumption into a fact.
+- Define one next task with an objective acceptance criterion.
+- Prefer a measurement or small experiment when behaviour is unknown.
+- Do not mark a milestone complete until its acceptance criteria are demonstrated.
+- Avoid premature implementation of Modbus, satellite optimisation or production hardware features.
+- The user should not need to maintain documentation manually.
+
+---
+
+## 12. Current state summary
+
+**FACT**
+- One ESP32-S3 board is available now for temporary experiments.
+- Two ESP32-S3 boards and two W5500 modules were previously ordered for the intended prototype.
+- The target first product is a two-node, two-port-per-node transparent serial device server.
+- The current project goal is protocol-independent byte transport, not Modbus processing.
+
+**DECISION**
+- Use the available ESP32-S3 and Wi-Fi for a temporary early network test.
+- Keep wired Ethernet/W5500 as the intended prototype path.
+- Connect RS-232 only through an appropriate RS-232 transceiver.
+- Determine the exact NPort mode/configuration before attempting compatibility testing.
+
+**ASSUMPTION**
+- The available board can be connected to a local Wi-Fi network suitable for the laboratory experiment.
+
+**TBD**
+- Exact board SKU, NPort configuration, RS-232 hardware/cabling and firmware environment.
+
+**Immediate next action**
+1. Identify the exact ESP32-S3 board.
+2. Identify the exact Moxa NPort model and how its serial port is configured for network communication.
+3. Confirm whether an RS-232 transceiver is available.
+
+Then start with W0/W1 and use the existing board for the Wi-Fi/TCP proof before moving to the physical serial bridge.
