@@ -57,8 +57,9 @@ The nodes should use a common firmware base with roles and network parameters de
 
 ### Available now
 
-- **1 × ESP32-S3 development board** is available and may temporarily be borrowed from another project for SGW bench experiments.
-- The exact ESP32-S3 board SKU, flash size and PSRAM configuration have not yet been recorded.
+- **1 × ESP32-S3-DevKitC-1 N16R8** development board is available and may temporarily be borrowed from another project for SGW bench experiments.
+- Board configuration: **16 MB Flash + 8 MB PSRAM**.
+- Wireless interfaces available for the temporary bench: **Wi-Fi and BLE**; SGW V0 uses Wi-Fi only.
 
 ### Previously ordered for the intended prototype
 
@@ -69,11 +70,15 @@ These are marked **ORDERED / NOT YET VERIFIED AS DELIVERED** until the user conf
 
 ### Serial electrical interface
 
-ESP32-S3 UART signals are logic-level signals, not RS-232 line levels. A suitable RS-232 transceiver is required between the MCU UART and a physical NPort RS-232 connection. Do not connect UART GPIO directly to an RS-232 port.
+The planned RS-232 transceiver for the bench prototype is **MAX238**.
+
+ESP32-S3 UART signals are logic-level signals, not RS-232 line levels. The MAX238 must be used as the electrical level converter between the MCU UART and the physical RS-232 connection. Do not connect ESP32-S3 UART GPIO directly to an RS-232 port.
+
+Before wiring, verify the exact MAX238 variant, supply voltage, charge-pump capacitors, pinout and intended channel/wiring against its datasheet and the actual component/package being used.
 
 ### Temporary network path
 
-For the first experiment, the available ESP32-S3 may use its built-in Wi-Fi instead of W5500. This is a temporary laboratory substitution, not a change to the target wired-Ethernet design.
+For the first experiment, the available ESP32-S3 will use its built-in Wi-Fi instead of W5500. This is a temporary laboratory substitution, not a change to the target wired-Ethernet design.
 
 The ESP32-S3 Wi-Fi path can validate IP/TCP application logic and basic interoperability. It does **not** validate W5500 hardware, wired Ethernet performance, nor the eventual satellite-link behaviour.
 
@@ -86,7 +91,7 @@ Develop the smallest working layer first:
 ```text
 RS-232 device
      │
-RS-232 transceiver
+RS-232 transceiver (MAX238)
      │
 ESP32-S3 UART
      │
@@ -113,7 +118,7 @@ The transport must preserve the stream's byte order and content. TCP does not pr
 - **Hardware interface:** UART, Wi-Fi initially, W5500 later, GPIO and timers.
 - **Byte-stream bridge:** bounded buffers, forward progress, backpressure/overflow accounting.
 - **Connection manager:** socket state, reconnect handling, diagnostics.
-- **Configuration/diagnostics:** network settings, serial parameters, counters and reset reason.
+- **Configuration/diagnostics:** firmware version, network settings, serial parameters, counters and reset reason.
 
 Modbus parsing, local polling, cache, data concentration and command semantics are explicitly postponed.
 
@@ -147,7 +152,7 @@ This **first test only proves that the ESP32 can communicate with the configured
 - Acceptance: stable boot log, known firmware/toolchain version, and repeatable flashing.
 
 **W1 — Wi-Fi network**
-- Connect ESP32-S3 to a controlled local Wi-Fi access point.
+- Connect ESP32-S3-DevKitC-1 N16R8 to a controlled local Wi-Fi access point.
 - Log assigned IP, RSSI (as available), disconnect/reconnect events.
 - Acceptance: stable IP connectivity and recovery after AP disconnection.
 
@@ -155,15 +160,15 @@ This **first test only proves that the ESP32 can communicate with the configured
 - Record exact NPort model, operation mode, local port, destination IP/port and serial settings.
 - Implement the required TCP role on ESP32-S3.
 - Exchange a known test pattern with a TCP peer/NPort where the configured mode permits.
-- Acceptance: the test confirms bidirectional TCP payload delivery; save logs and configuration summary.
+- Acceptance: the test confirms bidirectional TCP payload delivery; save build details, settings summary and logs.
 
 **W3 — RS-232 electrical connection**
-- Identify the available RS-232 transceiver/interface module.
+- Verify the MAX238 variant, supply and external charge-pump components before powering the interface.
 - Confirm correct DB9 signals and whether the NPort/device expects DTE or DCE wiring, including any null-modem crossover requirement.
 - Acceptance: UART↔RS-232 loopback works without directly connecting MCU GPIO to RS-232 voltage levels.
 
 **W4 — Byte-stream bridge**
-- Couple UART RX/TX and the TCP socket in both directions.
+- Couple UART and TCP socket in both directions.
 - Use a repeatable test pattern including all byte values where practical, long bursts and irregular pauses.
 - Acceptance: exact payload bytes and order are preserved; counters match; queue overflow and disconnect behaviour are visible.
 
@@ -181,7 +186,7 @@ This sequence deliberately separates IP/TCP checks from serial electrical testin
 
 ### M1 — Single-board Wi-Fi/TCP proof
 **Status: NEXT / IN PROGRESS**
-- Use the available ESP32-S3 board temporarily.
+- Use the available ESP32-S3-DevKitC-1 N16R8 board temporarily.
 - Establish reliable Wi-Fi connectivity and TCP socket operation.
 - Identify the NPort model and exact configuration required for interoperability.
 - Do not require W5500 or a second ESP32-S3 for this preliminary network test.
@@ -190,7 +195,7 @@ This sequence deliberately separates IP/TCP checks from serial electrical testin
 
 ### M2 — RS-232 hardware bring-up
 **Status: BLOCKED BY INTERFACE DETAILS**
-- Identify or obtain a suitable RS-232 transceiver/module.
+- Verify MAX238 electrical implementation.
 - Confirm wiring and serial parameters.
 - Verify UART loopback and RS-232 loopback.
 
@@ -253,10 +258,10 @@ Only after M3–M6 results, investigate improvements beyond a transparent bridge
 
 ## 9. Open questions
 
-- Exact ESP32-S3 board/module SKU and memory configuration.
 - Exact Moxa model used for the first bench experiment.
 - Current NPort operating mode and serial/network parameters.
-- Availability of an RS-232 transceiver/module and suitable cable.
+- Exact MAX238 variant/package, supply voltage and charge-pump component values.
+- Suitable RS-232 cable/DB9 wiring for the NPort.
 - Whether the NPort and ESP32 can be placed on the same local IP network for the first test.
 - Which firmware framework will be used. ESP-IDF is the current candidate; the choice should be made based on the user's installed environment and simplest repeatable workflow.
 - Exact W5500 model/module wiring, to be checked when delivered.
@@ -289,26 +294,27 @@ The GitHub repository is the persistent source of truth; the conversation is the
 ## 12. Current state summary
 
 **FACT**
-- One ESP32-S3 board is available now for temporary experiments.
+- One **ESP32-S3-DevKitC-1 N16R8 (16 MB Flash + 8 MB PSRAM)** board is available now for temporary experiments.
+- The planned RS-232 transceiver for the bench prototype is **MAX238**.
 - Two ESP32-S3 boards and two W5500 modules were previously ordered for the intended prototype.
 - The target first product is a two-node, two-port-per-node transparent serial device server.
 - The current project goal is protocol-independent byte transport, not Modbus processing.
 
 **DECISION**
-- Use the available ESP32-S3 and Wi-Fi for a temporary early network test.
+- Use the available ESP32-S3-DevKitC-1 N16R8 and Wi-Fi for a temporary early network test.
 - Keep wired Ethernet/W5500 as the intended prototype path.
-- Connect RS-232 only through an appropriate RS-232 transceiver.
+- Use MAX238 as the planned RS-232 transceiver, subject to electrical verification before wiring.
 - Determine the exact NPort mode/configuration before attempting compatibility testing.
 
 **ASSUMPTION**
 - The available board can be connected to a local Wi-Fi network suitable for the laboratory experiment.
 
 **TBD**
-- Exact board SKU, NPort configuration, RS-232 hardware/cabling and firmware environment.
+- Exact NPort configuration, MAX238 implementation/cabling and firmware environment.
 
 **Immediate next action**
-1. Identify the exact ESP32-S3 board.
-2. Identify the exact Moxa NPort model and how its serial port is configured for network communication.
-3. Confirm whether an RS-232 transceiver is available.
+1. Identify the exact Moxa NPort model and how its serial port is configured for network communication.
+2. Verify the MAX238 electrical implementation and available RS-232 cable/interface.
+3. Build and flash the first ESP32-S3 Wi-Fi test firmware.
 
-Then start with W0/W1 and use the existing board for the Wi-Fi/TCP proof before moving to the physical serial bridge.
+Then start W0/W1 and use the existing board for the Wi-Fi/TCP proof before moving to the physical serial bridge.
