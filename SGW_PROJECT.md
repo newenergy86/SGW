@@ -66,7 +66,8 @@ The first prototype consists of **two identical two-port SGW devices**.
           │                 │
        RS-232 ×2         RS-232 ×2
           │                 │
-      Modbus RTU        Modbus RTU
+      arbitrary         arbitrary
+      byte stream       byte stream
 ```
 
 The prototype hardware is intentionally small. After the architecture and transport are proven, the design can be expanded to an eight-port implementation.
@@ -99,13 +100,13 @@ The firmware should be separated into logical layers:
 ```text
 +------------------------------------------------+
 | SGW Application / Gateway Core                 |
-| polling / cache / commands / channel state     |
+| channel management / buffers / commands       |
 +------------------------------------------------+
 | SGW Transport                                  |
-| packetization / transaction IDs / ACK / retry  |
+| framing / transaction IDs / ACK / retry       |
 +------------------------------------------------+
 | Compatibility Layer                             |
-| serial parameters / Modbus RTU / NPort mode    |
+| serial parameters / byte-stream interface      |
 +------------------------------------------------+
 | Hardware Abstraction                            |
 | UART / RS-232 / W5500 / timers / GPIO          |
@@ -114,7 +115,7 @@ The firmware should be separated into logical layers:
 +------------------------------------------------+
 ```
 
-The compatibility layer must preserve the Modbus RTU interface seen by field devices. The optimization layer must not require changes to those field devices.
+**Important development boundary:** Modbus interpretation is deliberately outside the first prototype. SGW V0 treats the serial side as an arbitrary byte stream. Modbus-specific parsing, polling and cache logic are introduced only after the transparent serial/Ethernet transport is proven.
 
 ---
 
@@ -136,18 +137,21 @@ SGW ↔ SGW
 
 The first objective is transparent operation. Only after transparent operation is demonstrated should the SGW-specific optimization be enabled.
 
+The first compatibility target is therefore **serial-device-server behaviour**, not Modbus semantics: bytes entering an SGW serial port must be transported to the corresponding remote serial port without the gateway needing to understand their meaning.
+
 ---
 
 ## 7. Development sequence
 
 ### M0 — Project baseline
 
-Status: **IN PROGRESS / BASELINE CREATED**
+Status: **COMPLETED / BASELINE CREATED**
 
 - Define the problem and existing topology.
 - Establish the repository as the persistent project source.
 - Record the selected prototype hardware.
 - Define the staged development strategy.
+- Establish the AI-assisted development workflow defined in Section 12.
 
 ### M1 — Hardware bring-up
 
@@ -163,21 +167,47 @@ Status: **WAITING FOR HARDWARE**
 
 Acceptance: each hardware subsystem operates independently and diagnostics are available.
 
-### M2 — Basic two-node Ethernet gateway
+### M2 — SGW V0: transparent Serial ↔ Ethernet bridge
 
-Status: **PLANNED**
+Status: **NEXT DEVELOPMENT TARGET**
 
-Build a minimal SGW-A ↔ SGW-B connection over ordinary LAN Ethernet.
+Build a minimal SGW-A ↔ SGW-B connection over ordinary LAN Ethernet. At this stage SGW treats the serial interface as an opaque byte stream. No Modbus parsing or protocol-specific optimisation is required.
 
 Initial transport may be ordinary TCP. The transport choice for the optimized satellite mode remains open until experiments establish the requirements.
 
-Acceptance: stable bidirectional byte transfer between the two nodes.
+Acceptance:
 
-### M3 — Transparent Modbus RTU bridge
+- arbitrary bytes can be transmitted in both directions;
+- byte ordering and content are preserved;
+- two serial ports are logically independent;
+- continuous traffic does not lose or reorder bytes under normal LAN conditions;
+- connection loss and recovery are observable and deterministic;
+- diagnostics expose RX/TX byte counts and connection state.
+
+### M3 — NPort interoperability
 
 Status: **PLANNED**
 
-Implement:
+Test SGW against an existing NPort in the laboratory.
+
+Test both directions where applicable:
+
+```text
+NPort ↔ SGW
+SGW ↔ NPort
+```
+
+The exact NPort mode and parameters will be determined from the operational configuration when access becomes available.
+
+Acceptance: SGW can replace an NPort for the selected test channel without modification of the attached serial device.
+
+### M4 — Transparent Modbus RTU bridge
+
+Status: **PLANNED**
+
+Only after M2/M3 are stable, verify the transparent bridge using actual Modbus RTU traffic.
+
+Implement/test:
 
 ```text
 RS-232 → SGW-A → Ethernet → SGW-B → RS-232
@@ -194,23 +224,6 @@ Acceptance:
 - serial timing/parameters are preserved;
 - independent ports do not interfere;
 - RX/TX/error counters are available.
-
-### M4 — NPort interoperability
-
-Status: **PLANNED**
-
-Test SGW against an existing NPort in the laboratory.
-
-Test both directions where applicable:
-
-```text
-NPort ↔ SGW
-SGW ↔ NPort
-```
-
-The exact NPort mode and parameters will be determined from the operational configuration when access becomes available.
-
-Acceptance: SGW can replace an NPort for the selected test channel without modification of the Modbus field device.
 
 ### M5 — SGW-to-SGW transport
 
@@ -373,14 +386,14 @@ For each significant subsystem, first search for an existing proven implementati
 
 This applies especially to:
 
-- Modbus RTU framing;
 - serial/Ethernet gateway logic;
 - W5500 drivers;
 - TCP/IP handling;
 - packet framing and CRC;
 - retransmission/session logic;
 - embedded diagnostics;
-- configuration mechanisms.
+- configuration mechanisms;
+- later, Modbus RTU framing and gateway logic.
 
 Custom code should be introduced where existing solutions cannot satisfy the satellite-latency/control requirements.
 
@@ -399,7 +412,7 @@ Two identical two-port SGW prototypes.
 
 **Current architectural decision:**
 
-First implement transparent/compatibility operation, including NPort interoperability, then introduce optimized SGW transport.
+First implement a protocol-agnostic transparent Serial ↔ Ethernet bridge, verify NPort interoperability, then introduce optimized SGW transport. Modbus-specific optimisation is intentionally deferred.
 
 **Known satellite condition:**
 
@@ -415,10 +428,75 @@ Prepare the ESP32-S3/W5500 laboratory firmware and test plan so that hardware ca
 
 ---
 
-## 12. Working rule for this repository
+## 12. AI-assisted development protocol
 
-This file is the persistent project state.
+This project is developed jointly through the ChatGPT conversation and the GitHub repository. The repository is the persistent source of truth; the conversation is the interactive engineering workspace.
 
-When a significant technical decision, implementation result, test result, hardware change or requirement is established during SGW development, it should be reflected here. The user should not be required to manually maintain project documentation; project-state updates are to be made through the GitHub repository as part of the development workflow.
+### 12.1 No manual documentation maintenance
 
-Before beginning a new SGW work session, inspect the repository state and use this document to determine the current milestone and next action.
+The user should not be required to manually copy decisions, test results, code or project state from the conversation into repository files. When a significant project-state change is established, the assistant should update the appropriate repository file as part of the development workflow.
+
+### 12.2 Inspect before changing
+
+Before modifying project files, the assistant should inspect the current repository state and the relevant file version. Changes must preserve valid existing information and avoid overwriting unrelated work.
+
+### 12.3 Record state, not conversation noise
+
+The repository should contain durable engineering information rather than a transcript of the chat. Record decisions, requirements, verified test results, assumptions, rejected alternatives, implementation status and next actions.
+
+### 12.4 Explicit status labels
+
+Where useful, distinguish:
+
+- **FACT** — verified by documentation, measurement or experiment;
+- **DECISION** — explicitly accepted as the current project choice;
+- **ASSUMPTION** — working hypothesis not yet verified;
+- **TBD** — information required but currently unavailable;
+- **REJECTED** — considered and intentionally not selected.
+
+The assistant must not silently convert an assumption into a fact.
+
+### 12.5 One next step
+
+At the end of a meaningful development stage, identify one concrete next action with an objective acceptance criterion. Avoid presenting a large unsorted list of simultaneous tasks when one dependency must be completed first.
+
+### 12.6 Evidence before architecture
+
+When an important behaviour is unknown, prefer a small experiment, measurement or inspection of an existing implementation before freezing an architecture around an assumption.
+
+### 12.7 Reuse before invention
+
+Before implementing a substantial subsystem from scratch, search for existing compatible hardware, firmware, libraries, protocols, reference implementations and proven engineering approaches. Reuse is preferred when it reduces risk without compromising the project requirements.
+
+### 12.8 Milestone discipline
+
+Development proceeds through explicit milestones. Do not move a milestone to complete until its acceptance criteria are demonstrated. If an experiment contradicts an earlier assumption, update the project state and revise the next milestone rather than hiding the discrepancy.
+
+### 12.9 Keep early prototypes simple
+
+The first implementation should prove the smallest useful technical claim. For SGW V0 that claim is: **two nodes can reliably transport an arbitrary serial byte stream over Ethernet in both directions**. Modbus semantics, satellite optimisation and advanced gateway functions must not be introduced before the lower layer is demonstrated.
+
+### 12.10 Session recovery
+
+When a new SGW work session starts, the assistant should inspect the repository and determine:
+
+1. current project state;
+2. latest completed milestone;
+3. unresolved blockers;
+4. latest verified test results;
+5. current decisions and open questions;
+6. the single most appropriate next action.
+
+The assistant should use the repository rather than relying on memory of an earlier conversation.
+
+---
+
+## 13. Development log
+
+### 2026-10-25
+
+- GitHub repository `newenergy86/SGW` established as the project repository.
+- `SGW_PROJECT.md` established as the primary persistent project-state document.
+- Prototype hardware selected: ESP32-S3 + W5500, two nodes, two serial ports per node.
+- Development strategy refined: first build a protocol-agnostic transparent Serial ↔ Ethernet bridge; Modbus and satellite-specific optimisation follow only after the basic transport is proven.
+- AI-assisted development protocol added to prevent loss of decisions and to minimise manual project-documentation work.
