@@ -1,22 +1,22 @@
 # SGW — Satellite Modbus Gateway
 
 **Project status:** Development / laboratory prototype  
-**Last updated:** 2026-10-25  
+**Last updated:** 2026-10-27  
 **Primary source of truth:** this file
 
 ---
 
 ## 1. Project purpose
 
-SGW is a protocol-agnostic serial device-server prototype intended eventually to replace Moxa NPort devices in a system communicating over a high-latency satellite IP channel.
+SGW is a protocol-optimized serial gateway intended eventually to replace Moxa NPort devices in a system communicating over a high-latency satellite IP channel.
 
-The current estimated satellite round-trip time is approximately **2200 ms**. The broader system has approximately **80 polled devices**, but those higher-level Modbus concerns are explicitly outside the first prototype.
+The current estimated satellite round-trip time is approximately **2200 ms**. The broader system has approximately **80 polled devices**. The key architectural objective is to prevent the satellite RTT from forcing the supervisory system to wait for each individual remote Modbus transaction.
 
 ### First engineering objective
 
-> Demonstrate a reliable, bidirectional, protocol-independent serial-byte bridge over IP, using Moxa NPort as a behavioural reference.
+> Build two SGW nodes that make a remote Modbus RTU device appear to the supervisory server as a normal remotely accessible device, while the remote node polls the field device locally and the master node exchanges accumulated results with it in batches.
 
-For SGW V0, every serial payload is opaque. The firmware must not parse Modbus, apply CRC rules to the payload, identify command meaning, or optimise transactions. Those are potential later milestones, after the transparent transport works.
+The first laboratory implementation will still use a transparent serial-byte bridge as a compatibility and hardware-validation stage. Modbus-aware operation is a later milestone, not a requirement for the first electrical/network bring-up.
 
 ---
 
@@ -24,36 +24,148 @@ For SGW V0, every serial payload is opaque. The firmware must not parse Modbus, 
 
 The known system uses Moxa NPort serial device servers. The central side has been described as an eight-port NPort and the remote side typically as a one-port NPort. Model numbers mentioned in project history include NPort 5250A/5030 on the central side and 5010 on the remote side; **the exact installed model and configuration for the intended bench test must be verified**.
 
-Expected compatibility boundary:
+The NPort is the behavioural reference for the compatibility stage, but the final SGW architecture is deliberately different from a simple Serial-over-TCP bridge because of the satellite latency.
+
+Expected compatibility boundary for the initial stage:
 
 - serial byte stream remains unchanged;
 - serial parameters are configurable;
 - network connection and recovery behaviour are observable;
-- SGW does not need to know the payload protocol;
+- SGW can operate as a transparent serial device-server when required;
 - mixed NPort ↔ SGW testing is performed only using a compatible, explicitly configured NPort operating mode.
 
 NPort operating modes are configurable, not universal. Before a real interoperability test, record the exact model, port mode (e.g. TCP Client, TCP Server or Pair Connection), IP addresses/ports, and serial settings. Do not assume that any generic TCP socket automatically makes two devices interchangeable.
 
 ---
 
-## 3. Target topology
+## 3. Target SGW topology
 
-The final prototype target remains two identical two-port nodes:
+The final prototype target remains two SGW nodes. Each node is intended to have two RS-232 ports, although the first hardware prototype may use only one port.
 
 ```text
-                  IP network / later satellite
-                    ┌───────────────┐
-                    │               │
-                  SGW-A  ◄──────►  SGW-B
-                    │               │
-                RS-232 ×2       RS-232 ×2
+                         IP network / satellite
+                    ┌────────────────────────────┐
+                    │                            │
+              ┌─────▼─────┐                ┌─────▼─────┐
+              │   SGW-A   │◄──────────────►│   SGW-B   │
+              │  MASTER   │   SGW transport │   SLAVE   │
+              └─────┬─────┘                └─────┬─────┘
+                    │                              │
+              RS-232 ×2                       RS-232 ×2
+                    │                              │
+                    ▼                              ▼
+              SCADA / server                  field SAU
 ```
 
-The nodes should use a common firmware base with roles and network parameters defined by configuration. A later revision may scale to eight serial ports on the central side.
+### Roles
+
+**SGW-A — MASTER**
+
+- connected toward the supervisory server/SCADA side;
+- presents the remote devices/data to the server;
+- receives local requests from the server when operating in compatibility mode;
+- in optimized SGW mode, receives the remote slave's accumulated data/results in batches rather than waiting for every remote Modbus transaction individually.
+
+**SGW-B — SLAVE**
+
+- connected to the remote SAU/field device side;
+- performs the required Modbus RTU polling locally;
+- maintains the latest values/results needed by the master;
+- sends accumulated results to SGW-A as a batch over the inter-node transport.
+
+The exact mapping between server-visible addresses and remote Modbus unit/register addresses remains TBD until the real SAU polling scheme is documented.
 
 ---
 
-## 4. Hardware state — distinguish available from ordered
+## 4. Core architectural principle: local polling + batched inter-node exchange
+
+The central architectural idea of SGW is **not** to tunnel every Modbus request synchronously through the satellite link.
+
+A simplified conventional sequence would be:
+
+```text
+SCADA
+  │
+  │ request #1
+  ▼
+SGW-A ───────────── satellite ─────────────► SGW-B
+                                                │
+                                             Modbus RTU
+                                                │
+                                                ▼
+                                               SAU
+                                                │
+                                             response
+                                                │
+SGW-A ◄──────────── satellite ───────────── SGW-B
+  │
+  ▼
+SCADA
+
+then repeat for request #2, #3, #4 ...
+```
+
+With the intended SGW architecture, SGW-B performs the field polling locally:
+
+```text
+                         LOCAL, FAST
+                    ┌─────────────────┐
+                    │                 │
+                    │  SGW-B SLAVE    │
+                    │                 │
+                    │ Modbus polling  │
+                    └────────┬────────┘
+                             │
+                         RS-232 / RTU
+                             │
+                             ▼
+                            SAU
+```
+
+The results are accumulated and transferred to SGW-A as one transport batch:
+
+```text
+SAU
+ │
+ │ local Modbus requests/responses
+ ▼
+SGW-B
+ │
+ │ collect results
+ │
+ │  ┌──────────────────────────────┐
+ └─►│ batch:                       │
+    │ value A                      │
+    │ value B                      │
+    │ value C                      │
+    │ status / timestamp / seq.    │
+    │ ...                          │
+    └──────────────┬───────────────┘
+                   │
+             one SGW packet
+                   │
+             satellite / IP
+                   │
+                   ▼
+                 SGW-A
+                   │
+              data model
+                   │
+                   ▼
+                 SCADA
+```
+
+This architecture is intended to hide the satellite RTT from the normal field polling cycle. The remote device is polled locally; the satellite link carries aggregated state/results rather than requiring a round trip for every individual field request.
+
+### Important distinction
+
+The **transparent bridge** is the first engineering baseline and compatibility layer. The **master/slave batched architecture** is the target SGW functionality for the high-latency link.
+
+We must not assume the optimized architecture works merely because a local prototype works. It requires its own measurable tests after the transparent transport has been validated.
+
+---
+
+## 5. Hardware state — distinguish available from ordered
 
 ### Available now
 
@@ -68,63 +180,85 @@ The nodes should use a common firmware base with roles and network parameters de
 
 These are marked **ORDERED / NOT YET VERIFIED AS DELIVERED** until the user confirms arrival.
 
+### Alternative MCU prototype under consideration
+
+A low-cost laboratory implementation is also being considered using:
+
+- **STM32F103C8T6**;
+- **W5500** for Ethernet;
+- **MAX3232** for the RS-232 electrical interface.
+
+This is a prototype implementation candidate, not yet the final MCU decision. The application architecture should remain portable enough that the MCU can be changed if memory, UART count, DMA or timing requirements justify it.
+
 ### Serial electrical interface
 
-The planned RS-232 transceiver for the bench prototype is **MAX238**.
+The planned RS-232 transceiver for the current ESP32-S3 bench prototype is **MAX238**. For the STM32F103C8T6 test device, **MAX3232** is the current low-cost alternative under consideration.
 
-ESP32-S3 UART signals are logic-level signals, not RS-232 line levels. The MAX238 must be used as the electrical level converter between the MCU UART and the physical RS-232 connection. Do not connect ESP32-S3 UART GPIO directly to an RS-232 port.
+MCU UART signals are logic-level signals, not RS-232 line levels. A suitable RS-232 transceiver must be used between the MCU UART and the physical RS-232 connection. Do not connect MCU UART GPIO directly to an RS-232 port.
 
-Before wiring, verify the exact MAX238 variant, supply voltage, charge-pump capacitors, pinout and intended channel/wiring against its datasheet and the actual component/package being used.
+Before wiring, verify the exact transceiver variant, supply voltage, charge-pump capacitors, pinout and intended channel/wiring against its datasheet and the actual component/package being used.
 
 ### Temporary network path
 
 For the first experiment, the available ESP32-S3 will use its built-in Wi-Fi instead of W5500. This is a temporary laboratory substitution, not a change to the target wired-Ethernet design.
 
-The ESP32-S3 Wi-Fi path can validate IP/TCP application logic and basic interoperability. It does **not** validate W5500 hardware, wired Ethernet performance, nor the eventual satellite-link behaviour.
+The ESP32-S3 Wi-Fi path can validate IP/TCP/UDP application logic and basic interoperability. It does **not** validate W5500 hardware, wired Ethernet performance, nor the eventual satellite-link behaviour.
 
 ---
 
-## 5. Architecture principle
+## 6. Development stages
 
-Develop the smallest working layer first:
+The development is intentionally staged so that each layer can be tested independently.
+
+### Stage A — Transparent compatibility baseline
+
+Build a minimal Serial-over-IP bridge similar in behaviour to an NPort.
 
 ```text
 RS-232 device
      │
-RS-232 transceiver (MAX238)
+RS-232 transceiver
      │
-ESP32-S3 UART
+MCU UART
      │
 opaque byte buffers
      │
-TCP socket over Wi-Fi (temporary)
+IP transport
      │
-Moxa NPort / test endpoint
-
-Later: replace the temporary Wi-Fi link with the intended Ethernet path.
+NPort / SGW / test endpoint
 ```
 
-For the actual two-node byte bridge, the target flow is:
+This stage does not parse Modbus.
+
+### Stage B — Two-node SGW
+
+Build two identical nodes with configurable roles:
 
 ```text
-Serial A → SGW-A → IP transport → SGW-B → Serial B
-Serial B → SGW-B → IP transport → SGW-A → Serial A
+SGW-A MASTER  ◄──── IP transport ────► SGW-B SLAVE
+     │                                      │
+ server/SCADA                            SAU
 ```
 
-The transport must preserve the stream's byte order and content. TCP does not preserve application write boundaries as message boundaries; the bridge must forward the stream as bytes and must not rely on one socket read corresponding to one serial frame or one socket send.
+### Stage C — Local Modbus polling on SLAVE
 
-### Logical software layers
+SGW-B becomes Modbus-aware and polls the SAU locally. Polling is no longer dependent on the satellite RTT.
 
-- **Hardware interface:** UART, Wi-Fi initially, W5500 later, GPIO and timers.
-- **Byte-stream bridge:** bounded buffers, forward progress, backpressure/overflow accounting.
-- **Connection manager:** socket state, reconnect handling, diagnostics.
-- **Configuration/diagnostics:** firmware version, network settings, serial parameters, counters and reset reason.
+### Stage D — Batch transport
 
-Modbus parsing, local polling, cache, data concentration and command semantics are explicitly postponed.
+SGW-B packages multiple collected results into one SGW transport packet and sends them to SGW-A.
+
+### Stage E — MASTER presentation
+
+SGW-A maintains the server-facing representation of remote data so that the supervisory server can access it without performing a satellite round trip for every individual field value.
+
+### Stage F — High-latency validation
+
+Introduce controlled delay and loss, progressing toward RTT ≈ 2200 ms, and measure whether the batch architecture provides the intended improvement.
 
 ---
 
-## 6. Temporary ESP32-S3 + Wi-Fi + Moxa experiment
+## 7. Temporary ESP32-S3 + Wi-Fi + Moxa experiment
 
 The existing single ESP32-S3 can be used to start the network-side experiment before the remaining boards and W5500 arrive.
 
@@ -142,7 +276,7 @@ Moxa NPort (configured TCP Client or Server)
 
 Which endpoint must act as TCP client/server depends on the actual NPort mode and test topology. Determine this from the NPort configuration; do not guess.
 
-This **first test only proves that the ESP32 can communicate with the configured NPort over IP**. It does not yet prove a serial bridge because the ESP32 needs a suitable RS-232 transceiver and application that couples UART bytes to the socket.
+This first test proves network-side interoperability only. It does not prove the complete serial bridge until a suitable RS-232 transceiver and UART-to-socket application are connected.
 
 ### Test stages
 
@@ -151,32 +285,92 @@ This **first test only proves that the ESP32 can communicate with the configured
 - Build and flash a minimal firmware.
 - Acceptance: stable boot log, known firmware/toolchain version, and repeatable flashing.
 
-**W1 — Wi-Fi network**
+**W1 — IP network**
 - Connect ESP32-S3-DevKitC-1 N16R8 to a controlled local Wi-Fi access point.
 - Log assigned IP, RSSI (as available), disconnect/reconnect events.
 - Acceptance: stable IP connectivity and recovery after AP disconnection.
 
-**W2 — TCP socket interoperability with NPort**
-- Record exact NPort model, operation mode, local port, destination IP/port and serial settings.
-- Implement the required TCP role on ESP32-S3.
-- Exchange a known test pattern with a TCP peer/NPort where the configured mode permits.
-- Acceptance: the test confirms bidirectional TCP payload delivery; save build details, settings summary and logs.
+**W2 — TCP/UDP transport proof**
+- Prove a basic IP socket exchange with a PC before involving the real SAU.
+- UDP may be used as the first smoke test because it removes TCP connection-state complexity.
+- Then prove TCP operation for the NPort compatibility layer.
+- Acceptance: repeatable bidirectional payload exchange and visible connection/error state.
 
 **W3 — RS-232 electrical connection**
-- Verify the MAX238 variant, supply and external charge-pump components before powering the interface.
-- Confirm correct DB9 signals and whether the NPort/device expects DTE or DCE wiring, including any null-modem crossover requirement.
-- Acceptance: UART↔RS-232 loopback works without directly connecting MCU GPIO to RS-232 voltage levels.
+- Verify the exact transceiver, supply and external charge-pump components before powering the interface.
+- Confirm DB9 signals and whether the connected equipment expects DTE or DCE wiring, including any null-modem crossover requirement.
+- Acceptance: error-free repeatable UART↔RS-232 loopback.
 
-**W4 — Byte-stream bridge**
-- Couple UART and TCP socket in both directions.
+**W4 — Transparent byte-stream bridge**
+- Couple UART and IP socket in both directions.
 - Use a repeatable test pattern including all byte values where practical, long bursts and irregular pauses.
 - Acceptance: exact payload bytes and order are preserved; counters match; queue overflow and disconnect behaviour are visible.
 
-This sequence deliberately separates IP/TCP checks from serial electrical testing so failures can be located rather than debugged simultaneously.
+---
+
+## 8. SGW master/slave protocol — planned
+
+The optimized SGW transport must support batched exchange between the two nodes.
+
+### Direction SLAVE → MASTER
+
+SGW-B polls the SAU locally and accumulates results. A single transport packet may contain multiple logical results:
+
+```text
+┌──────────────────────────────────────────┐
+│ SGW packet header                        │
+│ protocol/version                         │
+│ source/destination node                  │
+│ sequence number                          │
+│ batch ID                                 │
+│ item count                               │
+├──────────────────────────────────────────┤
+│ result 1                                 │
+│ result 2                                 │
+│ result 3                                 │
+│ ...                                      │
+│ result N                                 │
+├──────────────────────────────────────────┤
+│ integrity check / CRC                    │
+└──────────────────────────────────────────┘
+```
+
+The exact binary format is **TBD** and must be designed only after the transparent transport is working.
+
+### Direction MASTER → SLAVE
+
+The master may later send a batch of commands/requests in one transport packet. The slave executes them locally against the SAU and returns the results in a corresponding batch.
+
+This is important for future command traffic because the design should not accidentally reintroduce one satellite RTT per Modbus request.
+
+### Reliability requirements
+
+Because the optimized transport is expected to operate over a high-latency and potentially lossy satellite path, the SGW protocol will need explicit mechanisms rather than relying on TCP semantics:
+
+- sequence number;
+- batch identifier;
+- acknowledgement;
+- retransmission policy;
+- duplicate detection;
+- timeout policy;
+- integrity check;
+- bounded queues;
+- overflow reporting;
+- link/session state.
+
+The precise reliability mechanism is **TBD until latency/loss experiments provide measurements**.
+
+### UDP vs TCP
+
+UDP is a candidate transport for the optimized SGW node-to-node protocol because it exposes individual datagrams and allows SGW to control batching, acknowledgement and retransmission itself.
+
+TCP remains a candidate/required mechanism for the NPort compatibility layer and ordinary Serial-over-IP operation.
+
+**DECISION:** Do not equate the optimized SGW transport with TCP merely because the compatibility prototype uses TCP. The optimized transport may use UDP plus SGW-level reliability if experiments confirm this is appropriate.
 
 ---
 
-## 7. Milestones
+## 9. Milestones
 
 ### M0 — Project baseline
 **Status: COMPLETED**
@@ -184,24 +378,24 @@ This sequence deliberately separates IP/TCP checks from serial electrical testin
 - Prototype strategy recorded.
 - AI-assisted workflow defined.
 
-### M1 — Single-board Wi-Fi/TCP proof
+### M1 — Single-board IP proof
 **Status: NEXT / IN PROGRESS**
-- Use the available ESP32-S3-DevKitC-1 N16R8 board temporarily.
-- Establish reliable Wi-Fi connectivity and TCP socket operation.
+- Use the available ESP32-S3-DevKitC-1 N16R8 temporarily.
+- Prove basic UDP exchange as the fastest socket smoke test.
+- Prove TCP socket operation for the NPort compatibility layer.
 - Identify the NPort model and exact configuration required for interoperability.
-- Do not require W5500 or a second ESP32-S3 for this preliminary network test.
 
-**Acceptance:** ESP32-S3 is reachable over the intended test LAN and can exchange test payloads with a TCP peer in the role required by the configured NPort mode. Save build details and logs.
+**Acceptance:** ESP32-S3 is reachable over the intended test LAN and can exchange test payloads bidirectionally with a PC; TCP interoperability is demonstrated in the role required by the configured NPort mode.
 
 ### M2 — RS-232 hardware bring-up
 **Status: BLOCKED BY INTERFACE DETAILS**
-- Verify MAX238 electrical implementation.
+- Verify MAX238 implementation for the ESP32 prototype or MAX3232 for the STM32 prototype.
 - Confirm wiring and serial parameters.
 - Verify UART loopback and RS-232 loopback.
 
 **Acceptance:** error-free repeatable data exchange through the physical RS-232 interface.
 
-### M3 — SGW V0 byte-stream bridge
+### M3 — SGW V0 transparent byte-stream bridge
 **Status: PLANNED**
 - Connect UART and TCP path both ways.
 - Add bounded buffering and overflow counters.
@@ -220,27 +414,46 @@ This sequence deliberately separates IP/TCP checks from serial electrical testin
 
 ### M5 — Two-node SGW over wired Ethernet
 **Status: PLANNED / WAITING FOR ORDERED HARDWARE**
-- Use the two ESP32-S3 boards and W5500 modules.
-- Replace temporary Wi-Fi network with W5500-based wired Ethernet where appropriate.
+- Use two nodes and W5500 modules.
+- Establish bidirectional transport between MASTER and SLAVE.
 - Preserve the byte-stream API and bridge logic where possible.
 
 **Acceptance:** two SGW nodes pass bidirectional byte-stream tests over wired Ethernet.
 
-### M6 — High-latency and recovery tests
-**Status: PLANNED**
-- Apply controlled latency, initially progressing toward RTT ≈ 2200 ms.
-- Test disconnects, reconnection and sustained transfer.
-- Measure throughput, latency and buffering limits.
-
-**Acceptance:** metrics and failure/recovery behaviour are documented. This stage tests the transparent baseline; it does not yet claim satellite optimisation.
-
-### M7 — SGW-specific transport optimisation
+### M6 — Local Modbus polling
 **Status: FUTURE**
-Only after M3–M6 results, investigate improvements beyond a transparent bridge. Any optimisation must be justified by measurements. Modbus-specific features remain a later decision.
+- Add Modbus RTU handling to the SLAVE only.
+- Implement local polling of the real SAU.
+- Store the latest valid results in the SLAVE data model.
+
+**Acceptance:** SLAVE can repeatedly poll the real SAU locally with no dependence on satellite RTT and produces verified values/statuses.
+
+### M7 — Batched MASTER/SLAVE transport
+**Status: FUTURE**
+- Define and implement the first SGW packet format.
+- Transfer multiple logical Modbus results in one packet.
+- Add sequence, batch ID, integrity check and explicit reliability handling.
+- Implement MASTER-side presentation of remote values to the supervisory server.
+
+**Acceptance:** N independent remote values can be delivered from SLAVE to MASTER using a single inter-node batch exchange, and the values/statuses are correctly reconstructed at MASTER.
+
+### M8 — High-latency and loss validation
+**Status: FUTURE**
+- Apply controlled latency, progressing toward RTT ≈ 2200 ms.
+- Test packet loss, duplication, reordering and disconnect/reconnect.
+- Compare sequential tunnelling against batched SGW transport.
+
+**Acceptance:** measured latency, throughput, packet efficiency, recovery time and stale-data behaviour are documented; the batched architecture demonstrates a measurable advantage for the intended polling workload.
+
+### M9 — Expansion
+**Status: FUTURE**
+- Add second RS-232 port per node.
+- Evaluate scaling to more ports only after the two-port architecture is proven.
+- Consider additional protocol/management functions based on measured requirements.
 
 ---
 
-## 8. Requirements for the transparent byte bridge
+## 10. Requirements for the transparent byte bridge
 
 - Payload bytes must not be interpreted or modified.
 - Byte order must be preserved.
@@ -256,26 +469,49 @@ Only after M3–M6 results, investigate improvements beyond a transparent bridge
 
 ---
 
-## 9. Open questions
+## 11. Requirements for the optimized SGW mode
 
-- Exact Moxa model used for the first bench experiment.
+- SLAVE must be able to poll the SAU locally.
+- Remote values must be represented by an explicit data model rather than an implicit TCP stream.
+- Multiple logical values/results must be transferable in one inter-node packet.
+- Every batch must be identifiable and verifiable.
+- Duplicate batches must not corrupt the data model.
+- Missing batches must be detectable.
+- The MASTER must expose the latest known remote values to the supervisory side.
+- Stale data must be distinguishable from fresh data.
+- Commands requiring execution at the remote SAU must have an explicit lifecycle/state.
+- Satellite RTT must not be assumed to be a reason to block all local polling.
+- The batch size and transmission interval must be measurable and configurable.
+- The protocol must remain independent of the physical Ethernet implementation so that Wi-Fi can be used during laboratory development and W5500/Ethernet later.
+
+---
+
+## 12. Open questions
+
+- Exact Moxa model used for the first compatibility bench experiment.
 - Current NPort operating mode and serial/network parameters.
 - Exact MAX238 variant/package, supply voltage and charge-pump component values.
 - Suitable RS-232 cable/DB9 wiring for the NPort.
 - Whether the NPort and ESP32 can be placed on the same local IP network for the first test.
-- Which firmware framework will be used. ESP-IDF is the current candidate; the choice should be made based on the user's installed environment and simplest repeatable workflow.
-- Exact W5500 model/module wiring, to be checked when delivered.
-- Final transport design for a satellite link remains open.
+- Which firmware framework will be used for ESP32-S3. ESP-IDF is the current candidate.
+- Exact W5500 module wiring, to be checked when delivered.
+- Final MCU choice for the multi-port prototype remains open; STM32F103C8T6 is currently a low-cost prototype candidate.
+- Exact SGW batch packet format.
+- Exact acknowledgement/retransmission mechanism.
+- How the MASTER will present remote values to the supervisory server.
+- Exact Modbus polling map and required update rates for the real SAU.
 
 ---
 
-## 10. Development rule: reuse before invention
+## 13. Development rule: reuse before invention
 
 Before implementing a substantial subsystem, check existing drivers, examples, protocol implementations and reference designs. Reuse is preferred when compatible with requirements and maintainability. Do not build an elaborate protocol before the basic bridge has been measured.
 
+For the optimized SGW protocol, existing reliable transport mechanisms may be reused as implementation components, but the project must retain control over batching, transaction identity, acknowledgement, retransmission and duplicate handling where the satellite link requires it.
+
 ---
 
-## 11. AI-assisted development protocol
+## 14. AI-assisted development protocol
 
 The GitHub repository is the persistent source of truth; the conversation is the engineering workspace.
 
@@ -286,35 +522,43 @@ The GitHub repository is the persistent source of truth; the conversation is the
 - Define one next task with an objective acceptance criterion.
 - Prefer a measurement or small experiment when behaviour is unknown.
 - Do not mark a milestone complete until its acceptance criteria are demonstrated.
-- Avoid premature implementation of Modbus, satellite optimisation or production hardware features.
+- Avoid premature implementation of the optimized Modbus transport before the transparent baseline has been validated.
 - The user should not need to maintain documentation manually.
 
 ---
 
-## 12. Current state summary
+## 15. Current state summary
 
 **FACT**
 - One **ESP32-S3-DevKitC-1 N16R8 (16 MB Flash + 8 MB PSRAM)** board is available now for temporary experiments.
-- The planned RS-232 transceiver for the bench prototype is **MAX238**.
+- The planned RS-232 transceiver for the ESP32 bench prototype is **MAX238**.
 - Two ESP32-S3 boards and two W5500 modules were previously ordered for the intended prototype.
-- The target first product is a two-node, two-port-per-node transparent serial device server.
-- The current project goal is protocol-independent byte transport, not Modbus processing.
+- The intended SGW system consists of a **MASTER node and a SLAVE node**.
+- The SLAVE is intended to poll the remote SAU locally.
+- The MASTER is intended to serve the supervisory server.
+- The optimized design is intended to transfer multiple remote values/results in batches rather than requiring one satellite exchange per individual Modbus transaction.
 
 **DECISION**
 - Use the available ESP32-S3-DevKitC-1 N16R8 and Wi-Fi for a temporary early network test.
 - Keep wired Ethernet/W5500 as the intended prototype path.
-- Use MAX238 as the planned RS-232 transceiver, subject to electrical verification before wiring.
-- Determine the exact NPort mode/configuration before attempting compatibility testing.
+- Use MAX238 as the planned ESP32 RS-232 transceiver, subject to electrical verification.
+- Treat TCP as the compatibility transport and keep UDP as a candidate for the optimized SGW inter-node transport.
+- Prototype hardware may use STM32F103C8T6 + W5500 + MAX3232 if this provides a faster/cheaper experimental path.
+- Build and validate the transparent bridge before implementing the optimized Modbus batch protocol.
 
 **ASSUMPTION**
-- The available board can be connected to a local Wi-Fi network suitable for the laboratory experiment.
+- The available ESP32-S3 board can be connected to a local Wi-Fi network suitable for the laboratory experiment.
 
 **TBD**
 - Exact NPort configuration, MAX238 implementation/cabling and firmware environment.
+- Final MCU and port count.
+- SGW batch packet format and reliability mechanism.
+- Exact remote SAU polling map and server-facing data representation.
 
 **Immediate next action**
-1. Identify the exact Moxa NPort model and how its serial port is configured for network communication.
-2. Verify the MAX238 electrical implementation and available RS-232 cable/interface.
-3. Build and flash the first ESP32-S3 Wi-Fi test firmware.
+1. Use the available ESP32-S3 to prove basic UDP/IP exchange, then TCP compatibility behaviour.
+2. Verify the RS-232 transceiver and physical wiring.
+3. Build the first transparent serial-byte bridge.
+4. After the bridge is proven, implement the two-node MASTER/SLAVE architecture with local polling and batched transport.
 
-Then start W0/W1 and use the existing board for the Wi-Fi/TCP proof before moving to the physical serial bridge.
+The optimized SGW mode is a planned architectural feature and is not claimed to be implemented until its dedicated milestones are experimentally demonstrated.
